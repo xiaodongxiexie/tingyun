@@ -3,6 +3,7 @@
 # @Date  : 2021/8/10
 
 import json
+import time
 import asyncio
 import logging
 from typing import Awaitable
@@ -12,10 +13,42 @@ from datetime import datetime, timedelta
 import aiohttp
 
 from script import table
-from script.table import _bulk_insert
+from script.table import session, _bulk_insert
 
 
 logger = logging.getLogger("aiops")
+
+
+# -------------------------------------------------------------------------------------------------
+URL = "https://api.tingyun.com/server/latest/accounts/1635961/charts/account-applications.json"
+
+URL_PREFIX = "https://api.tingyun.com/server/latest/accounts/1635961/application/{applicationId}/charts"
+
+URL_APDEX = "%s/application-apdex.json" % URL_PREFIX
+URL_ERRORS = "%s/application-errors.json" % URL_PREFIX
+URL_TOPN = "%s/application-webaction-topn.json" % URL_PREFIX
+URL_APPLICATION = "%s/application-application.json" % URL_PREFIX
+
+URL_THROUGHPUT = "%s/application-throughput.json" % URL_PREFIX
+URL_OVERVIEW_QUANTILE = "%s/application-overview-quantile.json" % URL_PREFIX
+URL_CPU = "%s/application-cpu.json" % URL_PREFIX
+URL_MEM = "%s/application-mem.json" % URL_PREFIX
+
+HEADERS = {"X-Auth-Key": "dnngfb73"}
+DATA = {"timePeriod": "", "endTime": "", "instanceId": ""}
+
+URLS_DICT = {
+    "Apdex": URL_APDEX,
+    "Error": URL_ERRORS,
+    "TopN": URL_TOPN,
+    "Application": URL_APPLICATION,
+
+    "Throughput": URL_THROUGHPUT,
+    "ResponseQuantile": URL_OVERVIEW_QUANTILE,
+    "CPU": URL_CPU,
+    "Memory": URL_MEM,
+}
+# -------------------------------------------------------------------------------------------------
 
 
 class Transform(object):
@@ -138,9 +171,7 @@ def retry(count: int = 10, allow_error=(Exception,)):
                     error = e
                     pass
             raise error
-
         return i
-
     return o
 
 
@@ -156,19 +187,19 @@ class TingYunApi(Request, Parse):
         self.urls_dicts = urls_dict
 
     @retry(count=30)
-    async def get_instance_id(self, applicationId, data, JSESSIONID):
-        headers = {"Cookie": f"JSESSIONID={JSESSIONID}"}
+    async def get_instance_id(self, applicationId, data, Cookie):
+        headers = {"Cookie": f"{Cookie}"}
         url = f"https://report.tingyun.com/server/application/instances?applicationId={applicationId}"
         url += f"&endTime=&timePeriod={data.get('timePeriod', '30')}"
         return await self.get(url, headers)
 
-    async def srunme(self, name, furl, response, data, JSESSIONID):
+    async def srunme(self, name, furl, response, data, Cookie):
         logger.info("[name] %s", name)
 
         async def run_per_ins(kw, obj):
             # 每个实例的数据
             # ------------------------------------------------------------------------
-            ids = await self.get_instance_id(obj["applicationId"], data, JSESSIONID)
+            ids = await self.get_instance_id(obj["applicationId"], data, Cookie)
             for iid in ids:
                 d = data.copy()
                 d["instanceId"] = iid["id"]
@@ -212,7 +243,7 @@ class TingYunApi(Request, Parse):
 
         await asyncio.gather(*[run_per_app(obj) for obj in response["data"]])
 
-    async def runme(self, dt: str, period: int = 30, JSESSIONID: str = None):
+    async def runme(self, dt: str, period: int = 30, Cookie: str = None):
         data = {
             "timePeriod": str(period),
             "endTime": dt
@@ -221,7 +252,7 @@ class TingYunApi(Request, Parse):
 
         await asyncio.gather(
             *[
-                self.srunme(name, furl, response, data, JSESSIONID)
+                self.srunme(name, furl, response, data, Cookie)
                 for name, furl in self.urls_dicts.items()
             ]
         )
@@ -233,18 +264,18 @@ class TingYunApi(Request, Parse):
         end_day_with_minute = str(end_day_with_minute)
         return end_day_with_minute
 
-    async def fast_fetch_one_day(self, dt: str, JSESSIONID: str):
+    async def fast_fetch_one_day(self, dt: str, Cookie: str):
         await asyncio.gather(
-            *[self.runme(dt=self.get_dt(dt, i), period=30, JSESSIONID=JSESSIONID) for i in range(1, 49)]
+            *[self.runme(dt=self.get_dt(dt, i), period=30, Cookie=Cookie) for i in range(1, 49)]
         )
         return self
-
-    async def fetch_one_day(self, dt: str, JSESSIONID: str, semaphore: int = 5):
+    
+    async def fetch_one_day(self, dt: str, Cookie: str, semaphore: int = 5):
         for i in range(1, 49, semaphore):
             await asyncio.gather(
                 *[
-                    self.runme(dt=self.get_dt(dt, ii), period=30, JSESSIONID=JSESSIONID)
-                    for ii in range(i, i + semaphore)
+                    self.runme(dt=self.get_dt(dt, ii), period=30, Cookie=Cookie)
+                    for ii in range(i, i+semaphore)
                     if ii < 49
                 ]
             )
@@ -257,3 +288,4 @@ def insert2table(outs: dict, batch_size: int = 1000):
         for v in vs:
             bulk_insert(getattr(table, k)(**v))
     bulk_insert(force=True)
+    
